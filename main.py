@@ -51,7 +51,7 @@ LOGIN_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>SNS Protocol - Military Terminal</title>
+    <title>SNS - A Secure Messaging System</title>
     <style>
         body {
             background: #000;
@@ -128,7 +128,7 @@ LOGIN_TEMPLATE = '''
 <body>
     <div class="terminal">
         <div class="header">
-            <h1>🔒 SNS PROTOCOL v1.0</h1>
+            <h1>🔒 SNS Messaging Protocol v1.0</h1>
             <p>SECURE NETWORKED MESSAGING SYSTEM</p>
             <p class="blink">CLASSIFIED - AUTHORIZED PERSONNEL ONLY</p>
         </div>
@@ -183,7 +183,7 @@ CHAT_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>SNS Protocol - Secure Channel</title>
+    <title>SNS Messaging Protocol - Secure Channel</title>
     <style>
         body {
             background: #000;
@@ -292,7 +292,7 @@ CHAT_TEMPLATE = '''
         <div class="main">
             <div class="header">
                 <h2>SNS SECURE CHANNEL {% if active_chat %}:: {{ active_chat }} {% endif %}<span class="blink">_</span></h2>
-                <div id="connection-status">ENCRYPTION: ACTIVE | PROTOCOL: SNS-256</div>
+                <div id="connection-status">ENCRYPTION: ACTIVE | PROTOCOL: SNS-REP-X239</div>
             </div>
 
             <div class="chat-area" id="chat-messages">
