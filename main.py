@@ -27,7 +27,7 @@ try:
     import geopy
 except ImportError:
     print("Installing required packages...")
-    os.system("python3 -m pip install --quiet flask==2.3.3 cryptography==41.0.4 requests==2.31.0 geopy==2.4.1")
+    os.system("python3 -m pip install --force-reinstall --quiet flask==2.3.3 cryptography==41.0.4 requests==2.31.0 geopy==2.4.1")
     import flask
     import cryptography
     import requests
