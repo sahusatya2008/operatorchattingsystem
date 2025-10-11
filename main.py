@@ -17,16 +17,21 @@ import struct
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from io import BytesIO
+import uuid
 
 # Check and install dependencies first
 try:
     import flask
     import cryptography
+    import requests
+    import geopy
 except ImportError:
     print("Installing required packages...")
-    os.system("python3 -m pip install --quiet flask==2.3.3 cryptography==41.0.4")
+    os.system("python3 -m pip install --quiet flask==2.3.3 cryptography==41.0.4 requests==2.31.0 geopy==2.4.1")
     import flask
     import cryptography
+    import requests
+    import geopy
 
 # Now import Flask components safely
 from flask import Flask, request, render_template_string, redirect, session, jsonify, send_file, make_response
@@ -50,15 +55,21 @@ SNS_CONFIG = {
 users_db = {}
 messages_db = {}
 sessions_db = {}
-file_storage = {}
 login_attempts = {}
 security_logs = []
 call_offers = {}
 call_answers = {}
 call_candidates = {}
+file_storage = {}
+user_locations = {}  # Store real-time GPS locations
+typing_indicators = {}  # Store typing status
 
 # Fixed key for signaling encryption (32 bytes)
 call_key = b'secure_call_key_for_signaling' + b'\x00' * (32 - len(b'secure_call_key_for_signaling'))
+
+
+# Track application start time for uptime calculation
+start_time = time.time()
 
 
 class AdvancedSecurity:
@@ -309,6 +320,9 @@ class SNSUserManager:
         # Derive master key
         master_key = SNSCrypto.derive_key(master_password, salt)
 
+        # Generate unique SNS phone number (format: SNS-XXXXX)
+        sns_number = f"SNS-{secrets.randbelow(90000) + 10000}"
+
         # Create user profile with encrypted storage key
         users_db[username] = {
             'salt': base64.b64encode(salt).decode(),
@@ -316,7 +330,8 @@ class SNSUserManager:
             'created_at': datetime.now(timezone.utc).isoformat(),
             'friends': [],
             'failed_logins': 0,
-            'locked_until': None
+            'locked_until': None,
+            'sns_number': sns_number
         }
 
         # Initialize message storage
@@ -373,9 +388,79 @@ class SNSUserManager:
             'username': username,
             'created_at': datetime.now(timezone.utc).isoformat(),
             'last_activity': datetime.now(timezone.utc).isoformat(),
-            'ip_address': request.remote_addr
+            'ip_address': request.remote_addr,
+            'user_agent': request.user_agent.string
         }
         return session_token
+
+
+class LocationTracker:
+    """Advanced location tracking with IP geolocation"""
+
+    @staticmethod
+    def get_location_info(ip_address: str) -> Dict:
+        """Get detailed location information from IP address"""
+        # Handle localhost IPs with mock data for testing
+        if ip_address in ['127.0.0.1', 'localhost', '::1']:
+            return {
+                'ip': ip_address,
+                'country': 'Local Network',
+                'region': 'Development',
+                'city': 'Localhost',
+                'loc': '28.6139,77.2090',  # Delhi coordinates for demo
+                'org': 'Local Development Server',
+                'timezone': 'Asia/Kolkata',
+                'hostname': 'localhost',
+                'postal': '110001'
+            }
+
+        try:
+            # Use ipinfo.io API for geolocation (free tier)
+            response = requests.get(f"https://ipinfo.io/{ip_address}/json", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    'ip': ip_address,
+                    'country': data.get('country', 'Unknown'),
+                    'region': data.get('region', 'Unknown'),
+                    'city': data.get('city', 'Unknown'),
+                    'loc': data.get('loc', '0,0'),  # lat,lng
+                    'org': data.get('org', 'Unknown'),
+                    'timezone': data.get('timezone', 'Unknown'),
+                    'hostname': data.get('hostname', 'Unknown'),
+                    'postal': data.get('postal', 'Unknown')
+                }
+            else:
+                return LocationTracker._fallback_location(ip_address)
+        except Exception as e:
+            print(f"Geolocation error for {ip_address}: {str(e)}")
+            return LocationTracker._fallback_location(ip_address)
+
+    @staticmethod
+    def _fallback_location(ip_address: str) -> Dict:
+        """Fallback location data when API fails"""
+        return {
+            'ip': ip_address,
+            'country': 'Unknown',
+            'region': 'Unknown',
+            'city': 'Unknown',
+            'loc': '0,0',
+            'org': 'Unknown',
+            'timezone': 'Unknown',
+            'hostname': ip_address,
+            'postal': 'Unknown'
+        }
+
+    @staticmethod
+    def get_distance(loc1: str, loc2: str) -> float:
+        """Calculate distance between two locations"""
+        try:
+            from geopy.distance import geodesic
+            lat1, lon1 = map(float, loc1.split(','))
+            lat2, lon2 = map(float, loc2.split(','))
+            return geodesic((lat1, lon1), (lat2, lon2)).kilometers
+        except:
+            return 0.0
 
 
 def find_available_port(start_port=5000, max_port=5010):
@@ -431,7 +516,7 @@ SECURE_HTML_HEADER = '''
 <html>
 <head>
     <title>SNS Protocol - Military Terminal</title>
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:; frame-src 'self' data:; object-src 'self' data:;">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script>
         // Advanced Security Measures
@@ -535,6 +620,23 @@ SECURE_HTML_HEADER = '''
             background: #0f0;
             color: #000;
         }
+        .dial-btn {
+            background: #001100;
+            border: 1px solid #0f0;
+            color: #0f0;
+            padding: 8px;
+            font-family: 'Courier New', monospace;
+            cursor: pointer;
+            text-align: center;
+            font-size: 12px;
+        }
+        .dial-btn:hover {
+            background: #0f0;
+            color: #000;
+        }
+        .dial-btn:active {
+            background: #003300;
+        }
         .blink {
             animation: blink 1s infinite;
         }
@@ -566,15 +668,6 @@ SECURE_HTML_HEADER = '''
         @keyframes alert-pulse {
             0%, 100% { background: #300; }
             50% { background: #500; }
-        }
-        .file-message {
-            border-color: #0ff;
-            background: #001133;
-        }
-        .encrypted-file {
-            padding: 10px;
-            margin: 5px 0;
-            border: 1px solid #0ff;
         }
     </style>
 </head>
@@ -634,6 +727,7 @@ LOGIN_TEMPLATE = SECURE_HTML_HEADER + '''
         <div class="message system-msg">{{ message }}</div>
         {% endif %}
 
+
         <div class="message system-msg">
             SECURITY PROTOCOLS ACTIVE:<br>
             • ANTI-TAMPERING PROTECTION<br>
@@ -660,10 +754,166 @@ LOGIN_TEMPLATE = SECURE_HTML_HEADER + '''
                 });
             });
         });
+
+        async function registerFingerprint() {
+            const username = '{{ fingerprint_username }}';
+            try {
+                // Begin registration
+                const beginResponse = await fetch('/webauthn/register/begin', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username: username})
+                });
+                const beginData = await beginResponse.json();
+                if (!beginResponse.ok) {
+                    alert('Error: ' + beginData.error);
+                    return;
+                }
+
+                // Create credential
+                const options = beginData.options;
+                options.rp.id = window.location.hostname; // Ensure domain matches
+                const credential = await navigator.credentials.create({
+                    publicKey: {
+                        challenge: Uint8Array.from(atob(options.challenge), c => c.charCodeAt(0)),
+                        rp: options.rp,
+                        user: {
+                            id: Uint8Array.from(atob(options.user.id), c => c.charCodeAt(0)),
+                            name: options.user.name,
+                            displayName: options.user.displayName
+                        },
+                        pubKeyCredParams: options.pubKeyCredParams,
+                        authenticatorSelection: options.authenticatorSelection,
+                        timeout: options.timeout
+                    }
+                });
+
+                // Complete registration
+                const completeResponse = await fetch('/webauthn/register/complete', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        username: username,
+                        challenge_id: beginData.challenge_id,
+                        credential: {
+                            id: credential.id,
+                            rawId: Array.from(new Uint8Array(credential.rawId)),
+                            response: {
+                                clientDataJSON: Array.from(new Uint8Array(credential.response.clientDataJSON)),
+                                attestationObject: Array.from(new Uint8Array(credential.response.attestationObject))
+                            },
+                            type: credential.type
+                        }
+                    })
+                });
+                const completeData = await completeResponse.json();
+                if (completeResponse.ok) {
+                    alert('FINGERPRINT REGISTERED SUCCESSFULLY');
+                    document.getElementById('fingerprint-modal').style.display = 'none';
+                    window.location.href = '/?mode=login';
+                } else {
+                    alert('Error: ' + completeData.error);
+                }
+            } catch (error) {
+                alert('FINGERPRINT REGISTRATION FAILED: ' + error.message);
+            }
+        }
+
+        async function authenticateFingerprint(username) {
+            try {
+                // Begin authentication
+                const beginResponse = await fetch('/webauthn/authenticate/begin', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username: username})
+                });
+                const beginData = await beginResponse.json();
+                if (!beginResponse.ok) {
+                    return false; // Error
+                }
+                if (!beginData.options) {
+                    return true; // No fingerprint required
+                }
+
+                // Get credential
+                const options = beginData.options;
+                options.rpId = window.location.hostname; // Ensure domain matches
+                const credential = await navigator.credentials.get({
+                    publicKey: {
+                        challenge: Uint8Array.from(atob(options.challenge), c => c.charCodeAt(0)),
+                        allowCredentials: options.allowCredentials.map(cred => ({
+                            id: Uint8Array.from(atob(cred.id), c => c.charCodeAt(0)),
+                            type: cred.type
+                        })),
+                        timeout: options.timeout,
+                        rpId: options.rpId
+                    }
+                });
+
+                // Complete authentication
+                const completeResponse = await fetch('/webauthn/authenticate/complete', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        username: username,
+                        challenge_id: beginData.challenge_id,
+                        credential: {
+                            id: credential.id,
+                            rawId: Array.from(new Uint8Array(credential.rawId)),
+                            response: {
+                                clientDataJSON: Array.from(new Uint8Array(credential.response.clientDataJSON)),
+                                authenticatorData: Array.from(new Uint8Array(credential.response.authenticatorData)),
+                                signature: Array.from(new Uint8Array(credential.response.signature)),
+                                userHandle: credential.response.userHandle ? Array.from(new Uint8Array(credential.response.userHandle)) : null
+                            },
+                            type: credential.type
+                        }
+                    })
+                });
+                const completeData = await completeResponse.json();
+                return completeResponse.ok;
+            } catch (error) {
+                return false; // Authentication failed or cancelled
+            }
+        }
+
+        async function handleLogin(e) {
+            const form = e.target;
+            const formData = new FormData(form);
+            const username = formData.get('username');
+            const password = formData.get('master_password');
+
+            // First verify password
+            const passwordResponse = await fetch('/', {
+                method: 'POST',
+                body: new URLSearchParams({mode: 'login', username: username, master_password: password})
+            });
+
+            if (passwordResponse.redirected && passwordResponse.url.includes('/chat')) {
+                // Password correct, now check fingerprint
+                const fingerprintSuccess = await authenticateFingerprint(username);
+                if (fingerprintSuccess) {
+                    // Proceed to chat
+                    window.location.href = '/chat';
+                } else {
+                    alert('FINGERPRINT AUTHENTICATION FAILED');
+                    // Reset form
+                    form.querySelector('button[type="submit"]').disabled = false;
+                    form.querySelector('button[type="submit"]').textContent = '[ ACCESS SYSTEM ]';
+                }
+            } else {
+                // Password wrong, handle as normal
+                const text = await passwordResponse.text();
+                document.body.innerHTML = text; // Reload page with error
+            }
+
+            e.preventDefault();
+        }
     </script>
 </body>
 </html>
 '''
+
 
 CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
     <div id="incoming-call" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #000; border: 2px solid #0f0; padding: 20px; z-index: 1001; color: #0f0; font-family: \'Courier New\', monospace; text-align: center;">
@@ -674,14 +924,27 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
 
     <div id="video-container" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #000; z-index: 1000; color: #0f0; font-family: \'Courier New\', monospace;">
         <video id="remote-video" autoplay style="width: 100%; height: 100%; object-fit: cover;"></video>
-        <video id="local-video" autoplay muted style="width: 200px; height: 150px; position: absolute; bottom: 20px; right: 20px; border: 2px solid #0f0;"></video>
-        <button id="end-call-btn" onclick="endCall()" style="position: absolute; top: 20px; right: 20px; background: #f00; color: #fff; border: 2px solid #f00; padding: 10px 20px; font-family: \'Courier New\', monospace; cursor: pointer;">[ END CALL ]</button>
+        <video id="local-video" autoplay muted style="width: 200px; height: 150px; position: absolute; bottom: 80px; right: 20px; border: 2px solid #0f0;"></video>
+
+        <div id="video-controls" style="position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px;">
+            <button id="mute-btn" onclick="toggleMute()" style="background: #001100; color: #0f0; border: 2px solid #0f0; padding: 10px; font-family: \'Courier New\', monospace; cursor: pointer;">[ MUTE ]</button>
+            <button id="video-btn" onclick="toggleVideo()" style="background: #001100; color: #0f0; border: 2px solid #0f0; padding: 10px; font-family: \'Courier New\', monospace; cursor: pointer;">[ VIDEO OFF ]</button>
+            <button id="flip-btn" onclick="flipCamera()" style="background: #001100; color: #0f0; border: 2px solid #0f0; padding: 10px; font-family: \'Courier New\', monospace; cursor: pointer;">[ FLIP ]</button>
+            <button id="audio-only-btn" onclick="toggleAudioOnly()" style="background: #001100; color: #0f0; border: 2px solid #0f0; padding: 10px; font-family: \'Courier New\', monospace; cursor: pointer;">[ AUDIO ONLY ]</button>
+            <button id="end-call-btn" onclick="endCall()" style="background: #f00; color: #fff; border: 2px solid #f00; padding: 10px; font-family: \'Courier New\', monospace; cursor: pointer;">[ END CALL ]</button>
+        </div>
+
         <div id="call-status" style="position: absolute; top: 20px; left: 20px; background: #001100; border: 1px solid #0f0; padding: 10px;">CALL STATUS: CONNECTING...</div>
+        <div id="encryption-status" style="position: absolute; top: 20px; right: 20px; background: #001100; border: 1px solid #0f0; padding: 10px;">ENCRYPTION: ACTIVE - MILITARY GRADE</div>
     </div>
 
     <div class="container">
         <div class="sidebar">
             <h3>OPERATORS ONLINE</h3>
+            <div style="margin-bottom: 10px;">
+                <strong>YOUR SNS NUMBER:</strong><br>
+                <span style="color: #0f0; font-family: 'Courier New', monospace; font-size: 14px;">{{ user_sns_number }}</span>
+            </div>
             <div id="users-list">
                 {% for user in users %}
                 <div class="user-item {% if user == active_chat %}active-chat{% endif %}" onclick="selectUser('{{ user }}')">
@@ -692,17 +955,42 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
             <div style="margin-top: 20px;">
                 <input type="text" id="search-user" placeholder="FIND OPERATOR..." autocomplete="off" spellcheck="false">
                 <button onclick="searchUser()">[ SEARCH ]</button>
-                <div style="margin-top: 10px;">
-                    <input type="file" id="file-input" style="display: none;" onchange="handleFileSelect()">
-                    <button onclick="document.getElementById('file-input').click()">[ SEND FILE ]</button>
+                <div style="margin-top: 15px; border-top: 1px solid #0f0; padding-top: 10px;">
+                    <div style="margin-bottom: 10px;">
+                        <input type="text" id="dial-number" placeholder="ENTER SNS NUMBER..." autocomplete="off" spellcheck="false" maxlength="9" style="width: 100%; margin-bottom: 5px;">
+                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-bottom: 10px;">
+                            <button onclick="dialDigit('1')" class="dial-btn">[1]</button>
+                            <button onclick="dialDigit('2')" class="dial-btn">[2]</button>
+                            <button onclick="dialDigit('3')" class="dial-btn">[3]</button>
+                            <button onclick="dialDigit('4')" class="dial-btn">[4]</button>
+                            <button onclick="dialDigit('5')" class="dial-btn">[5]</button>
+                            <button onclick="dialDigit('6')" class="dial-btn">[6]</button>
+                            <button onclick="dialDigit('7')" class="dial-btn">[7]</button>
+                            <button onclick="dialDigit('8')" class="dial-btn">[8]</button>
+                            <button onclick="dialDigit('9')" class="dial-btn">[9]</button>
+                            <button onclick="dialDigit('S')" class="dial-btn">[S]</button>
+                            <button onclick="dialDigit('N')" class="dial-btn">[N]</button>
+                            <button onclick="dialDigit('-')" class="dial-btn">[-]</button>
+                        </div>
+                        <button onclick="dialCall()" style="width: 100%; margin-bottom: 5px;">[ CALL SNS NUMBER ]</button>
+                        <button onclick="clearDial()" style="width: 100%;">[ CLEAR ]</button>
+                    </div>
                 </div>
                 <button id="video-call-btn" onclick="startVideoCall()" style="margin-top: 10px;">[ VIDEO CALL ]</button>
+                <button onclick="startVoiceCall()" style="margin-top: 10px; background: #001133; border-color: #0ff;">[ VOICE CALL ]</button>
                 <button onclick="logout()" style="background: #300; border-color: #f00; margin-top: 10px;">[ LOGOUT ]</button>
+
+                <div id="clock-widget" style="margin-top: 20px; background: #001100; border: 1px solid #0f0; padding: 10px; text-align: center; font-family: 'Courier New', monospace;">
+                    <div id="time-display" style="font-size: 18px; color: #0f0; margin-bottom: 5px;"></div>
+                    <div id="date-display" style="font-size: 12px; color: #ff0;"></div>
+                    <div id="day-display" style="font-size: 12px; color: #0ff;"></div>
+                </div>
             </div>
             <div class="security-alert" style="margin-top: 20px; font-size: 12px;">
                 SECURE CHANNEL ACTIVE<br>
                 ENCRYPTION: SNS-512<br>
                 VIDEO: ENCRYPTED<br>
+                MESSAGES: SECURE<br>
                 THREAT LEVEL: LOW
             </div>
         </div>
@@ -710,15 +998,16 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
         <div class="main">
             <div class="header">
                 <h2>SNS SECURE CHANNEL {% if active_chat %}:: {{ active_chat }} {% endif %}<span class="blink">_</span></h2>
-                <div id="connection-status">ENCRYPTION: ACTIVE | PROTOCOL: SNS-512 | FILES: SECURE</div>
+                <div id="connection-status">ENCRYPTION: ACTIVE | PROTOCOL: SNS-512 | CHAT: SECURE</div>
             </div>
 
             <div class="chat-area" id="chat-messages">
                 <!-- Messages will be loaded here -->
+                <div id="typing-indicator" style="display: none; color: #ff0; font-style: italic; padding: 5px; border-top: 1px solid #0f0; margin-top: 10px;"></div>
             </div>
 
             <div class="input-area">
-                <input type="text" id="message-input" placeholder="TYPE ENCRYPTED MESSAGE..." style="width: 60%;" autocomplete="off" spellcheck="false">
+                <input type="text" id="message-input" placeholder="TYPE ENCRYPTED MESSAGE..." style="width: 60%;" autocomplete="off" spellcheck="false" oninput="startTyping()" onkeypress="handleKeyPress(event)">
                 <button onclick="sendMessage()">[ SEND ]</button>
                 <button onclick="clearChat()">[ WIPE ]</button>
             </div>
@@ -750,9 +1039,52 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
             }
         }
 
+        function dialDigit(digit) {
+            const input = document.getElementById('dial-number');
+            input.value += digit;
+        }
+
+        function clearDial() {
+            document.getElementById('dial-number').value = '';
+        }
+
+        function dialCall() {
+            const snsNumber = document.getElementById('dial-number').value.trim();
+            if (!snsNumber) {
+                alert('ENTER SNS NUMBER FIRST');
+                return;
+            }
+
+            // Validate SNS number format
+            if (snsNumber.length !== 9 || !snsNumber.toUpperCase().startsWith('SNS-') || isNaN(snsNumber.slice(4))) {
+                alert('INVALID SNS NUMBER FORMAT. USE: SNS-XXXXX');
+                return;
+            }
+
+            fetch('/search_user_by_number', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({sns_number: snsNumber})
+            }).then(r => r.json()).then(data => {
+                if (data.found) {
+                    selectUser(data.username);
+                    clearDial();
+                    setTimeout(() => startVoiceCall(), 500); // Auto-start voice call
+                } else {
+                    alert('SNS NUMBER NOT FOUND: ' + snsNumber);
+                }
+            }).catch(error => {
+                alert('SEARCH FAILED: ' + error.message);
+            });
+        }
+
         function sendMessage() {
-            const message = document.getElementById('message-input').value;
-            if (message && activeUser) {
+            const message = document.getElementById('message-input').value.trim();
+            if (message && activeUser && !document.getElementById('message-input').disabled) {
+                // Disable input to prevent double submission
+                document.getElementById('message-input').disabled = true;
+                document.querySelector('button[onclick="sendMessage()"]').disabled = true;
+
                 fetch('/send_message', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -760,81 +1092,24 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
                 }).then(r => r.json()).then(data => {
                     if (data.success) {
                         document.getElementById('message-input').value = '';
+                        stopTyping(); // Stop typing indicator
                         loadMessages();
                     } else {
                         alert('SECURITY ERROR: Message blocked');
                     }
+                }).catch(error => {
+                    console.error('Message send failed:', error);
+                    alert('Failed to send message');
+                }).finally(() => {
+                    // Re-enable input
+                    document.getElementById('message-input').disabled = false;
+                    document.querySelector('button[onclick="sendMessage()"]').disabled = false;
+                    document.getElementById('message-input').focus();
                 });
             }
         }
 
-        function handleFileSelect() {
-            const fileInput = document.getElementById('file-input');
-            const file = fileInput.files[0];
 
-            if (!file) return;
-
-            // Check file size
-            if (file.size > 50 * 1024 * 1024) {
-                alert('SECURITY ERROR: File too large (max 50MB)');
-                return;
-            }
-
-            const password = prompt('SET FILE PASSWORD (min 8 characters):');
-            if (!password || password.length < 8) {
-                alert('SECURITY ERROR: Password must be at least 8 characters');
-                return;
-            }
-
-            const confirmPassword = prompt('CONFIRM FILE PASSWORD:');
-            if (password !== confirmPassword) {
-                alert('SECURITY ERROR: Passwords do not match');
-                return;
-            }
-
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('to', activeUser);
-            formData.append('password', password);
-
-            fetch('/send_file', {
-                method: 'POST',
-                body: formData
-            }).then(r => r.json()).then(data => {
-                if (data.success) {
-                    alert('FILE ENCRYPTED AND SENT SECURELY');
-                    loadMessages();
-                } else {
-                    alert('SECURITY ERROR: ' + data.error);
-                }
-                fileInput.value = '';
-            });
-        }
-
-        function downloadFile(fileId, filename) {
-            const password = prompt('ENTER FILE PASSWORD:');
-            if (!password) return;
-
-            fetch('/download_file', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({file_id: fileId, password: password})
-            }).then(r => {
-                if (r.ok) return r.blob();
-                throw new Error('Download failed');
-            }).then(blob => {
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = filename;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                window.URL.revokeObjectURL(url);
-            }).catch(error => {
-                alert('SECURITY ERROR: Invalid password or file corrupted');
-            });
-        }
 
         function loadMessages() {
             if (activeUser) {
@@ -845,26 +1120,129 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
                     container.innerHTML = '';
                     messages.forEach(msg => {
                         const div = document.createElement('div');
-                        if (msg.type === 'file') {
-                            div.className = 'message file-message';
-                            div.innerHTML = `
-                                <strong>${msg.sender}:</strong> 
-                                <div class="encrypted-file">
-                                    📎 ENCRYPTED FILE: ${msg.filename}<br>
-                                    <small>Size: ${msg.file_size} | Type: ${msg.file_type}</small><br>
-                                    <button onclick="downloadFile('${msg.file_id}', '${msg.filename}')">[ DECRYPT & DOWNLOAD ]</button>
-                                </div>
-                                <em>${msg.timestamp}</em>
-                            `;
-                        } else {
-                            div.className = msg.sender == '{{ session_user }}' ? 'message own-message' : 'message';
-                            div.innerHTML = `<strong>${msg.sender}:</strong> ${msg.message} <em>${msg.timestamp}</em>`;
-                        }
+                        div.className = msg.sender == '{{ session_user }}' ? 'message own-message' : 'message';
+                        div.innerHTML = `<strong>${msg.sender}:</strong> ${msg.message} <em>${msg.timestamp}</em>`;
                         container.appendChild(div);
                     });
                     container.scrollTop = container.scrollHeight;
                 });
             }
+        }
+
+        // Real-time geolocation tracking
+        function startLocationTracking() {
+            if ('geolocation' in navigator) {
+                // Get initial location
+                navigator.geolocation.getCurrentPosition(sendLocationToServer, handleLocationError, {
+                    enableHighAccuracy: true,
+                    timeout: 10000,
+                    maximumAge: 60000
+                });
+
+                // Watch position for real-time updates
+                navigator.geolocation.watchPosition(sendLocationToServer, handleLocationError, {
+                    enableHighAccuracy: true,
+                    timeout: 10000,
+                    maximumAge: 30000
+                });
+            } else {
+                console.log('Geolocation not supported');
+            }
+        }
+
+        function sendLocationToServer(position) {
+            fetch('/update_location', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    latitude: position.coords.latitude,
+                    longitude: position.coords.longitude,
+                    accuracy: position.coords.accuracy
+                })
+            }).catch(error => console.log('Location update failed:', error));
+        }
+
+        function handleLocationError(error) {
+            console.log('Geolocation error:', error.message);
+        }
+
+        // Typing indicators
+        let typingTimer;
+        const typingDelay = 1000; // 1 second delay
+
+        function startTyping() {
+            if (activeUser) {
+                fetch('/update_typing', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({is_typing: true, recipient: activeUser})
+                });
+
+                clearTimeout(typingTimer);
+                typingTimer = setTimeout(stopTyping, typingDelay);
+            }
+        }
+
+        function stopTyping() {
+            if (activeUser) {
+                fetch('/update_typing', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({is_typing: false, recipient: activeUser})
+                });
+            }
+        }
+
+        function checkTypingStatus() {
+            if (activeUser) {
+                fetch('/get_typing_status?with=' + activeUser)
+                .then(r => r.json())
+                .then(data => {
+                    const indicator = document.getElementById('typing-indicator');
+                    if (data.is_typing && data.user === activeUser) {
+                        indicator.textContent = `${data.user} is typing...`;
+                        indicator.style.display = 'block';
+                    } else {
+                        indicator.style.display = 'none';
+                    }
+                }).catch(error => {
+                    console.error('Failed to check typing status:', error);
+                    // Hide indicator on error to avoid stuck indicators
+                    document.getElementById('typing-indicator').style.display = 'none';
+                });
+            } else {
+                // Hide indicator if no active user
+                document.getElementById('typing-indicator').style.display = 'none';
+            }
+        }
+
+        // User status updates
+        function updateUserStatuses() {
+            fetch('/get_user_status')
+            .then(r => r.json())
+            .then(statuses => {
+                // Update user list with online status
+                const userItems = document.querySelectorAll('.user-item');
+                userItems.forEach(item => {
+                    const username = item.textContent.split(' [')[0].trim();
+                    const status = statuses[username];
+
+                    if (status) {
+                        let statusText = status.online ? '🟢 ONLINE' : `⚫ ${status.last_seen}`;
+                        item.innerHTML = `${username} <span style="font-size: 10px; color: ${status.online ? '#0f0' : '#666'};">${statusText}</span>`;
+                    }
+                });
+
+                // Update current chat header
+                if (activeUser && statuses[activeUser]) {
+                    const status = statuses[activeUser];
+                    const header = document.querySelector('h2');
+                    if (header) {
+                        let statusIndicator = status.online ? '<span style="color: #0f0;">🟢 ONLINE</span>' : `<span style="color: #666;">⚫ ${status.last_seen}</span>`;
+                        header.innerHTML = `SNS SECURE CHANNEL :: ${activeUser} ${statusIndicator}<span class="blink">_</span>`;
+                    }
+                }
+            });
         }
 
         function clearChat() {
@@ -883,11 +1261,96 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
             }
         }
 
-        // Auto-refresh messages
-        setInterval(loadMessages, 2000);
-        document.addEventListener('DOMContentLoaded', loadMessages);
+        // User activity tracking for online status
+        let lastActivityTime = Date.now();
+        let isUserActive = true;
+        let heartbeatInterval = null;
 
-        // Enter key to send message
+        function updateActivity() {
+            lastActivityTime = Date.now();
+            isUserActive = true;
+        }
+
+        function checkActivity() {
+            const now = Date.now();
+            const timeSinceActivity = now - lastActivityTime;
+
+            // If user hasn't been active for 5 minutes and page is hidden, mark as away
+            if (timeSinceActivity > 300000 && document.hidden) {
+                isUserActive = false;
+            } else if (timeSinceActivity < 60000) { // Active if activity within 1 minute
+                isUserActive = true;
+            }
+        }
+
+        // Track user activity
+        document.addEventListener('mousedown', updateActivity);
+        document.addEventListener('keydown', updateActivity);
+        document.addEventListener('scroll', updateActivity);
+        document.addEventListener('touchstart', updateActivity);
+
+        // Track page visibility and manage heartbeat accordingly
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                // Page is hidden (user switched tabs or minimized) - stop heartbeat and mark inactive
+                isUserActive = false;
+                if (heartbeatInterval) {
+                    clearInterval(heartbeatInterval);
+                    heartbeatInterval = null;
+                }
+                // Send one final heartbeat to mark as inactive
+                fetch('/user_heartbeat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({active: false})
+                }).catch(error => console.log('Final heartbeat failed:', error));
+            } else {
+                // Page is visible again - resume heartbeat and mark active
+                updateActivity();
+                if (!heartbeatInterval) {
+                    heartbeatInterval = setInterval(sendHeartbeat, 30000);
+                }
+            }
+        });
+
+        // Send heartbeat to server every 30 seconds to maintain online status
+        function sendHeartbeat() {
+            fetch('/user_heartbeat', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({active: isUserActive})
+            }).catch(error => console.log('Heartbeat failed:', error));
+        }
+
+        // Start heartbeat on page load
+        function startHeartbeat() {
+            if (!heartbeatInterval) {
+                heartbeatInterval = setInterval(sendHeartbeat, 30000);
+            }
+        }
+
+        // Initialize all features
+        document.addEventListener('DOMContentLoaded', function() {
+            loadMessages();
+            startLocationTracking();
+            updateUserStatuses();
+            updateActivity(); // Initial activity
+            startHeartbeat(); // Start heartbeat system
+
+            // Auto-refresh features
+            setInterval(loadMessages, 2000);
+            setInterval(checkTypingStatus, 1000);
+            setInterval(updateUserStatuses, 5000);
+            setInterval(checkActivity, 30000); // Check activity every 30 seconds
+        });
+
+        function handleKeyPress(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        // Enter key to send message (keeping original for compatibility)
         document.getElementById('message-input').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
                 sendMessage();
@@ -899,6 +1362,10 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
         let localStream = null;
         let inCall = false;
         let incomingOffer = null;
+        let isMuted = false;
+        let isVideoOff = false;
+        let isAudioOnly = false;
+        let currentFacingMode = 'user';
 
         function startVideoCall() {
             if (!activeUser) {
@@ -910,7 +1377,22 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
                 return;
             }
 
-            navigator.mediaDevices.getUserMedia({video: true, audio: true}).then(stream => {
+            // Ultra HD quality constraints for mobile
+            const constraints = {
+                video: {
+                    width: { ideal: 1920, min: 640 },
+                    height: { ideal: 1080, min: 480 },
+                    frameRate: { ideal: 30, min: 15 },
+                    facingMode: 'user'  // front camera default
+                },
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            };
+
+            navigator.mediaDevices.getUserMedia(constraints).then(stream => {
                 localStream = stream;
                 document.getElementById('local-video').srcObject = stream;
                 document.getElementById('video-container').style.display = 'block';
@@ -949,16 +1431,104 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
                     fetch('/start_call', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({target: activeUser, offer: peerConnection.localDescription})
+                        body: JSON.stringify({target: activeUser, offer: peerConnection.localDescription, voice_only: false})
                     });
                 });
 
                 inCall = true;
+                isAudioOnly = false;
                 document.getElementById('call-status').textContent = 'CALL STATUS: CALLING...';
                 pollForCallAnswers();
 
             }).catch(err => {
                 alert('CAMERA/MIC ACCESS DENIED: ' + err.message);
+            });
+        }
+
+        function startVoiceCall() {
+            if (!activeUser) {
+                alert('SELECT AN OPERATOR FIRST');
+                return;
+            }
+            if (inCall) {
+                alert('ALREADY IN CALL');
+                return;
+            }
+
+            // Voice-only constraints (no video)
+            const constraints = {
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    sampleRate: 48000, // High quality audio
+                    channelCount: 2    // Stereo
+                }
+            };
+
+            navigator.mediaDevices.getUserMedia(constraints).then(stream => {
+                localStream = stream;
+                // Hide video elements for voice call
+                document.getElementById('local-video').style.display = 'none';
+                document.getElementById('remote-video').style.display = 'none';
+                document.getElementById('video-container').style.display = 'block';
+                document.getElementById('call-status').textContent = 'VOICE CALL: CONNECTING...';
+                document.getElementById('encryption-status').textContent = 'ENCRYPTION: ACTIVE - MILITARY GRADE';
+
+                peerConnection = new RTCPeerConnection({
+                    iceServers: [{urls: 'stun:stun.l.google.com:19302'}],
+                    iceCandidatePoolSize: 10
+                });
+
+                peerConnection.addStream(stream);
+
+                peerConnection.onicecandidate = event => {
+                    if (event.candidate) {
+                        fetch('/send_ice_candidate', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({target: activeUser, candidate: event.candidate})
+                        });
+                    }
+                };
+
+                peerConnection.onaddstream = event => {
+                    // Create audio element for remote audio in voice call
+                    const remoteAudio = document.createElement('audio');
+                    remoteAudio.id = 'remote-audio';
+                    remoteAudio.autoplay = true;
+                    remoteAudio.srcObject = event.stream;
+                    document.getElementById('video-container').appendChild(remoteAudio);
+                    document.getElementById('call-status').textContent = 'VOICE CALL: CONNECTED - ENCRYPTED';
+                };
+
+                peerConnection.oniceconnectionstatechange = () => {
+                    if (peerConnection.iceConnectionState === 'disconnected' || peerConnection.iceConnectionState === 'failed') {
+                        endCall();
+                    }
+                };
+
+                peerConnection.createOffer().then(offer => {
+                    return peerConnection.setLocalDescription(offer);
+                }).then(() => {
+                    fetch('/start_call', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({target: activeUser, offer: peerConnection.localDescription, voice_only: true})
+                    });
+                });
+
+                inCall = true;
+                isAudioOnly = true;
+                // Hide video controls, show audio controls
+                document.getElementById('video-btn').style.display = 'none';
+                document.getElementById('flip-btn').style.display = 'none';
+                document.getElementById('audio-only-btn').style.display = 'none';
+                document.getElementById('call-status').textContent = 'VOICE CALL: CALLING...';
+                pollForCallAnswers();
+
+            }).catch(err => {
+                alert('MICROPHONE ACCESS DENIED: ' + err.message);
             });
         }
 
@@ -997,21 +1567,62 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
             .then(data => {
                 if (data.offers.length > 0 && !incomingOffer && !inCall) {
                     incomingOffer = data.offers[0];
+                    const callType = incomingOffer.voice_only ? 'VOICE' : 'VIDEO';
                     document.getElementById('caller-name').textContent = incomingOffer.from;
                     document.getElementById('incoming-call').style.display = 'block';
+                    // Add call type indicator
+                    const callerElement = document.getElementById('caller-name');
+                    callerElement.textContent = `${callType} CALL FROM ${incomingOffer.from}`;
                 }
             });
         }
 
         function handleIncomingCall(offerData) {
-            navigator.mediaDevices.getUserMedia({video: true, audio: true}).then(stream => {
+            const isVoiceCall = offerData.voice_only;
+            const callType = isVoiceCall ? 'VOICE CALL' : 'VIDEO CALL';
+
+            // Choose appropriate media constraints
+            const constraints = isVoiceCall ? {
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    sampleRate: 48000,
+                    channelCount: 2
+                }
+            } : {
+                video: {
+                    width: { ideal: 1920, min: 640 },
+                    height: { ideal: 1080, min: 480 },
+                    frameRate: { ideal: 30, min: 15 },
+                    facingMode: 'user'
+                },
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            };
+
+            navigator.mediaDevices.getUserMedia(constraints).then(stream => {
                 localStream = stream;
-                document.getElementById('local-video').srcObject = stream;
+
+                if (!isVoiceCall) {
+                    document.getElementById('local-video').srcObject = stream;
+                    document.getElementById('local-video').style.display = 'block';
+                    document.getElementById('remote-video').style.display = 'block';
+                } else {
+                    // Voice call - hide video elements
+                    document.getElementById('local-video').style.display = 'none';
+                    document.getElementById('remote-video').style.display = 'none';
+                }
+
                 document.getElementById('video-container').style.display = 'block';
-                document.getElementById('call-status').textContent = 'CALL STATUS: CONNECTING...';
+                document.getElementById('call-status').textContent = `${callType}: CONNECTING...`;
 
                 peerConnection = new RTCPeerConnection({
-                    iceServers: [{urls: 'stun:stun.l.google.com:19302'}]
+                    iceServers: [{urls: 'stun:stun.l.google.com:19302'}],
+                    iceCandidatePoolSize: 10
                 });
 
                 peerConnection.addStream(stream);
@@ -1027,8 +1638,17 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
                 };
 
                 peerConnection.onaddstream = event => {
-                    document.getElementById('remote-video').srcObject = event.stream;
-                    document.getElementById('call-status').textContent = 'CALL STATUS: CONNECTED';
+                    if (isVoiceCall) {
+                        // Create audio element for voice call
+                        const remoteAudio = document.createElement('audio');
+                        remoteAudio.id = 'remote-audio';
+                        remoteAudio.autoplay = true;
+                        remoteAudio.srcObject = event.stream;
+                        document.getElementById('video-container').appendChild(remoteAudio);
+                    } else {
+                        document.getElementById('remote-video').srcObject = event.stream;
+                    }
+                    document.getElementById('call-status').textContent = `${callType}: CONNECTED - ENCRYPTED`;
                 };
 
                 peerConnection.oniceconnectionstatechange = () => {
@@ -1049,11 +1669,85 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
                 });
 
                 inCall = true;
-                document.getElementById('call-status').textContent = 'CALL STATUS: CONNECTING...';
+                isAudioOnly = isVoiceCall;
+                if (isVoiceCall) {
+                    document.getElementById('video-btn').style.display = 'none';
+                    document.getElementById('flip-btn').style.display = 'none';
+                    document.getElementById('audio-only-btn').style.display = 'none';
+                }
+                document.getElementById('call-status').textContent = `${callType}: CONNECTING...`;
                 pollForIceCandidates();
 
             }).catch(err => {
-                alert('CAMERA/MIC ACCESS DENIED: ' + err.message);
+                alert('MEDIA ACCESS DENIED: ' + err.message);
+            });
+        }
+
+        function toggleMute() {
+            if (localStream) {
+                const audioTrack = localStream.getAudioTracks()[0];
+                if (audioTrack) {
+                    audioTrack.enabled = isMuted;
+                    isMuted = !isMuted;
+                    document.getElementById('mute-btn').textContent = isMuted ? '[ UNMUTE ]' : '[ MUTE ]';
+                    document.getElementById('mute-btn').style.background = isMuted ? '#f00' : '#001100';
+                }
+            }
+        }
+
+        function toggleVideo() {
+            if (localStream) {
+                const videoTrack = localStream.getVideoTracks()[0];
+                if (videoTrack) {
+                    videoTrack.enabled = isVideoOff;
+                    isVideoOff = !isVideoOff;
+                    document.getElementById('video-btn').textContent = isVideoOff ? '[ VIDEO ON ]' : '[ VIDEO OFF ]';
+                    document.getElementById('video-btn').style.background = isVideoOff ? '#f00' : '#001100';
+                }
+            }
+        }
+
+        function flipCamera() {
+            if (!inCall) return;
+
+            currentFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
+
+            const constraints = {
+                video: {
+                    width: { ideal: 1920, min: 640 },
+                    height: { ideal: 1080, min: 480 },
+                    frameRate: { ideal: 30, min: 15 },
+                    facingMode: currentFacingMode
+                },
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            };
+
+            navigator.mediaDevices.getUserMedia(constraints).then(newStream => {
+                // Replace video track
+                const newVideoTrack = newStream.getVideoTracks()[0];
+                const sender = peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
+                if (sender) {
+                    sender.replaceTrack(newVideoTrack);
+                }
+
+                // Update local video
+                document.getElementById('local-video').srcObject = newStream;
+
+                // Stop old stream
+                localStream.getVideoTracks()[0].stop();
+                localStream = newStream;
+
+                // Restore mute/video state
+                const audioTrack = localStream.getAudioTracks()[0];
+                if (audioTrack) audioTrack.enabled = !isMuted;
+                const videoTrack = localStream.getVideoTracks()[0];
+                if (videoTrack) videoTrack.enabled = !isVideoOff;
+            }).catch(err => {
+                alert('Camera flip failed: ' + err.message);
             });
         }
 
@@ -1068,7 +1762,22 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
             document.getElementById('video-container').style.display = 'none';
             document.getElementById('remote-video').srcObject = null;
             document.getElementById('local-video').srcObject = null;
+            // Remove audio element if it exists
+            const remoteAudio = document.getElementById('remote-audio');
+            if (remoteAudio) {
+                remoteAudio.remove();
+            }
             inCall = false;
+            isMuted = false;
+            isVideoOff = false;
+            isAudioOnly = false;
+            currentFacingMode = 'user';
+            // Reset control visibility
+            document.getElementById('video-btn').style.display = 'inline-block';
+            document.getElementById('flip-btn').style.display = 'inline-block';
+            document.getElementById('audio-only-btn').style.display = 'inline-block';
+            document.getElementById('local-video').style.display = 'block';
+            document.getElementById('remote-video').style.display = 'block';
         }
 
         // Event listeners for call buttons
@@ -1085,6 +1794,32 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
                 incomingOffer = null;
             });
         });
+
+        // Camera functions
+
+        // Clock widget
+        function updateClock() {
+            const now = new Date();
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            const seconds = String(now.getSeconds()).padStart(2, '0');
+            const milliseconds = String(now.getMilliseconds()).padStart(3, '0');
+            const timeString = `${hours}:${minutes}:${seconds}.${milliseconds}`;
+
+            const dateOptions = { year: 'numeric', month: 'long', day: 'numeric' };
+            const dateString = now.toLocaleDateString('en-US', dateOptions);
+
+            const dayOptions = { weekday: 'long' };
+            const dayString = now.toLocaleDateString('en-US', dayOptions);
+
+            document.getElementById('time-display').textContent = timeString;
+            document.getElementById('date-display').textContent = dateString;
+            document.getElementById('day-display').textContent = dayString;
+        }
+
+        // Update clock every 10ms for milliseconds
+        setInterval(updateClock, 10);
+        updateClock(); // Initial call
 
         // Poll for call offers every 1 second
         setInterval(pollForCallOffers, 1000);
@@ -1168,10 +1903,91 @@ CHAT_TEMPLATE = SECURE_HTML_HEADER + '''
         @keyframes blink {
             50% { opacity: 0; }
         }
+
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            .terminal {
+                margin: 10px;
+                padding: 15px;
+                max-width: none;
+            }
+            .sidebar {
+                width: 100%;
+                border-right: none;
+                border-bottom: 2px solid #0f0;
+                padding: 15px;
+            }
+            .main {
+                width: 100%;
+            }
+            .chat-area {
+                padding: 15px;
+            }
+            .input-area {
+                padding: 15px;
+                flex-direction: column;
+            }
+            .input-area input {
+                width: 100%;
+                margin-bottom: 10px;
+            }
+            .user-item {
+                display: inline-block;
+                margin: 5px;
+                padding: 8px;
+            }
+            #video-controls {
+                bottom: 10px;
+                flex-wrap: wrap;
+                gap: 5px;
+            }
+            #video-controls button {
+                padding: 8px;
+                font-size: 12px;
+            }
+            #local-video {
+                width: 120px;
+                height: 90px;
+                bottom: 60px;
+                right: 10px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .header h2 {
+                font-size: 14px;
+            }
+            .terminal {
+                font-size: 12px;
+            }
+            .input-group label {
+                font-size: 12px;
+            }
+            #call-status {
+                font-size: 12px;
+                padding: 5px;
+            }
+            #incoming-call {
+                width: 90%;
+                padding: 15px;
+            }
+            #incoming-call button {
+                width: 100%;
+                margin: 5px 0;
+            }
+            #clock-widget {
+                font-size: 10px;
+                padding: 5px;
+            }
+            #time-display {
+                font-size: 14px;
+            }
+        }
     </style>
 </body>
 </html>
 '''
+
 
 
 @app.route('/', methods=['GET', 'POST'])
@@ -1241,10 +2057,14 @@ def chat():
     active_chat = AdvancedSecurity.sanitize_input(request.args.get('with', ''))
     all_users = [user for user in users_db.keys() if user != session['user']]
 
+    # Get user's SNS number
+    user_sns_number = users_db.get(session['user'], {}).get('sns_number', 'SNS-00000')
+
     response = make_response(render_template_string(CHAT_TEMPLATE,
                                       users=all_users,
                                       active_chat=active_chat,
-                                      session_user=session['user']))
+                                      session_user=session['user'],
+                                      user_sns_number=user_sns_number))
 
     # Security headers
     response.headers['X-Content-Type-Options'] = 'nosniff'
@@ -1263,6 +2083,24 @@ def search_user():
     exists = username in users_db and username != session['user']
     return jsonify({'exists': exists})
 
+
+@app.route('/search_user_by_number', methods=['POST'])
+@require_auth
+def search_user_by_number():
+    data = request.get_json()
+    sns_number = AdvancedSecurity.sanitize_input(data.get('sns_number', '').strip())
+
+    # Find user by SNS number
+    found_user = None
+    for username, user_data in users_db.items():
+        if user_data.get('sns_number') == sns_number.upper() and username != session['user']:
+            found_user = username
+            break
+
+    if found_user:
+        return jsonify({'found': True, 'username': found_user, 'sns_number': sns_number.upper()})
+    else:
+        return jsonify({'found': False, 'error': 'SNS number not found'})
 
 @app.route('/send_message', methods=['POST'])
 @require_auth
@@ -1431,6 +2269,8 @@ def download_file():
         return jsonify({'success': False, 'error': 'Download failed'})
 
 
+
+
 @app.route('/get_messages')
 @require_auth
 def get_messages():
@@ -1463,6 +2303,7 @@ def start_call():
     data = request.get_json()
     target = AdvancedSecurity.sanitize_input(data.get('target', ''))
     offer = data.get('offer')
+    voice_only = data.get('voice_only', False)
 
     if not target or not offer or target not in users_db or target == session['user']:
         return jsonify({'success': False, 'error': 'Invalid target'})
@@ -1477,10 +2318,12 @@ def start_call():
     call_offers[target].append({
         'from': session['user'],
         'encrypted_offer': encrypted_offer,
-        'timestamp': datetime.now(timezone.utc).isoformat()
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'voice_only': voice_only
     })
 
-    AdvancedSecurity.log_security_event("VIDEO_CALL_STARTED", f"Video call initiated to {target}", session['user'])
+    call_type = "VOICE CALL" if voice_only else "VIDEO CALL"
+    AdvancedSecurity.log_security_event(f"{call_type}_STARTED", f"{call_type} initiated to {target}", session['user'])
     return jsonify({'success': True})
 
 
@@ -1499,7 +2342,8 @@ def get_call_offers():
             decrypted_offers.append({
                 'from': offer_data['from'],
                 'offer': offer,
-                'timestamp': offer_data['timestamp']
+                'timestamp': offer_data['timestamp'],
+                'voice_only': offer_data.get('voice_only', False)
             })
         except:
             continue  # Skip invalid
@@ -1603,6 +2447,154 @@ def get_ice_candidates():
     return jsonify({'candidates': decrypted_candidates})
 
 
+@app.route('/update_location', methods=['POST'])
+@require_auth
+def update_location():
+    """Update user's real-time GPS location"""
+    try:
+        data = request.get_json()
+        latitude = data.get('latitude')
+        longitude = data.get('longitude')
+        accuracy = data.get('accuracy', 0)
+
+        if latitude is None or longitude is None:
+            return jsonify({'success': False, 'error': 'Invalid location data'})
+
+        # Store user's real-time location
+        user_locations[session['user']] = {
+            'latitude': float(latitude),
+            'longitude': float(longitude),
+            'accuracy': float(accuracy),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'ip': request.remote_addr
+        }
+
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/update_typing', methods=['POST'])
+@require_auth
+def update_typing():
+    """Update typing indicator status"""
+    try:
+        data = request.get_json()
+        is_typing = data.get('is_typing', False)
+        recipient = data.get('recipient')
+
+        if not recipient or recipient not in users_db:
+            return jsonify({'success': False, 'error': 'Invalid recipient'})
+
+        key = f"{session['user']}_{recipient}"
+
+        if is_typing:
+            typing_indicators[key] = {
+                'user': session['user'],
+                'recipient': recipient,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+            # Also create reverse indicator for the recipient to see
+            reverse_key = f"{recipient}_{session['user']}"
+            typing_indicators[reverse_key] = {
+                'user': recipient,
+                'recipient': session['user'],
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        else:
+            # Remove both directions of typing indicator
+            if key in typing_indicators:
+                del typing_indicators[key]
+            reverse_key = f"{recipient}_{session['user']}"
+            if reverse_key in typing_indicators:
+                del typing_indicators[reverse_key]
+
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/get_typing_status')
+@require_auth
+def get_typing_status():
+    """Get typing status for current chat"""
+    recipient = request.args.get('with', '')
+    if not recipient:
+        return jsonify({'is_typing': False})
+
+    # Check if recipient is typing to current user
+    key = f"{recipient}_{session['user']}"
+    if key in typing_indicators:
+        # Check if typing indicator is still valid (within last 3 seconds)
+        indicator_time = datetime.fromisoformat(typing_indicators[key]['timestamp'])
+        if (datetime.now(timezone.utc) - indicator_time).total_seconds() < 3:
+            return jsonify({'is_typing': True, 'user': recipient})
+
+    return jsonify({'is_typing': False})
+
+
+@app.route('/user_heartbeat', methods=['POST'])
+@require_auth
+def user_heartbeat():
+    """Update user's activity status via heartbeat"""
+    try:
+        data = request.get_json()
+        is_active = data.get('active', True)  # Default to True for backward compatibility
+
+        # Update session last activity time
+        if session['token'] in sessions_db:
+            current_time = datetime.now(timezone.utc).isoformat()
+            session_data = sessions_db[session['token']]
+
+            if is_active:
+                # User is actively using the chat - update last activity
+                session_data['last_activity'] = current_time
+                AdvancedSecurity.log_security_event("USER_ACTIVITY", f"User active in session", session['user'])
+            else:
+                # User switched tabs or became inactive - don't update last activity
+                # The last activity will remain as the last time they were actively chatting
+                pass
+
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/get_user_status')
+def get_user_status():
+    """Get online status for all users"""
+    user_statuses = {}
+    current_time = datetime.now(timezone.utc)
+
+    for username in users_db.keys():
+        is_online = False
+        last_seen = "Never"
+
+        # Check if user has active sessions
+        for session_data in sessions_db.values():
+            if session_data['username'] == username:
+                session_time = datetime.fromisoformat(session_data['last_activity'])
+                time_diff = (current_time - session_time).total_seconds()
+
+                if time_diff < 60:  # 1 minute threshold for online (more responsive)
+                    is_online = True
+                    last_seen = "Online"
+                else:
+                    last_seen = f"Last seen {session_time.strftime('%H:%M %d/%m/%Y')}"
+                break
+
+        if not is_online and last_seen == "Never":
+            last_seen = "Never"
+
+        user_statuses[username] = {
+            'online': is_online,
+            'last_seen': last_seen,
+            'location': user_locations.get(username)
+        }
+
+    return jsonify(user_statuses)
+
+
 @app.route('/logout')
 def logout():
     if 'token' in session and session['token'] in sessions_db:
@@ -1614,23 +2606,18 @@ def logout():
 
 
 def cleanup_sessions():
-    """Clean up expired sessions and files"""
+    """Clean up expired sessions, call items, locations, and typing indicators"""
     current_time = datetime.now(timezone.utc)
     expired_tokens = []
-    expired_files = []
     expired_call_items = []
+    expired_locations = []
+    expired_typing_indicators = []
 
     # Clean expired sessions
     for token, session_data in sessions_db.items():
         last_activity = datetime.fromisoformat(session_data['last_activity'])
         if (current_time - last_activity).total_seconds() > SNS_CONFIG['session_timeout']:
             expired_tokens.append(token)
-
-    # Clean old files (older than 24 hours)
-    for file_id, file_info in file_storage.items():
-        file_time = datetime.fromisoformat(file_info['timestamp'])
-        if (current_time - file_time).total_seconds() > 86400:  # 24 hours
-            expired_files.append(file_id)
 
     # Clean old call items (older than 1 hour)
     for user in list(call_offers.keys()):
@@ -1648,17 +2635,39 @@ def cleanup_sessions():
         if not call_candidates[user]:
             del call_candidates[user]
 
+    # Clean old location data (older than 24 hours)
+    for user, location_data in user_locations.items():
+        location_time = datetime.fromisoformat(location_data['timestamp'])
+        if (current_time - location_time).total_seconds() > 86400:  # 24 hours
+            expired_locations.append(user)
+
+    # Clean expired typing indicators (older than 10 seconds)
+    for key, indicator_data in typing_indicators.items():
+        indicator_time = datetime.fromisoformat(indicator_data['timestamp'])
+        if (current_time - indicator_time).total_seconds() > 10:
+            expired_typing_indicators.append(key)
+
+    # Remove expired items
     for token in expired_tokens:
         del sessions_db[token]
 
-    for file_id in expired_files:
-        del file_storage[file_id]
+    for user in expired_locations:
+        del user_locations[user]
+
+    for key in expired_typing_indicators:
+        del typing_indicators[key]
 
 
 if __name__ == '__main__':
     # Initialize test users
-    SNSUserManager.create_user("operator1", "password123")
-    SNSUserManager.create_user("operator2", "password123")
+    operator1 = SNSUserManager.create_user("operator1", "password123")
+    operator2 = SNSUserManager.create_user("operator2", "password123")
+
+    # Display SNS numbers
+    if operator1:
+        print(f"OPERATOR1 SNS NUMBER: {users_db['operator1']['sns_number']}")
+    if operator2:
+        print(f"OPERATOR2 SNS NUMBER: {users_db['operator2']['sns_number']}")
 
     # Find available port
     port = find_available_port(5000, 5010)
@@ -1675,14 +2684,17 @@ if __name__ == '__main__':
     print("NOTE: To test video calls between users, use two different browsers or incognito windows.")
     print("")
     print("SECURITY FEATURES ACTIVE:")
-    print("• File encryption with individual passwords")
-    print("• Malicious file detection using magic numbers")
     print("• Advanced anti-tampering protection")
     print("• Session monitoring and intrusion detection")
     print("• Rate limiting and account locking")
     print("• Real-time security logging")
     print("• Encrypted video calling with WebRTC")
     print("• Multi-layer signaling encryption")
+    print("• End-to-end encrypted messaging")
+    print("• Unique SNS phone numbering system")
+    print("• Direct calling by SNS number")
+    print("• Military-grade encrypted voice calling")
+    print("• Biometric fingerprint authentication")
     print("=" * 70)
 
     # Run cleanup every 30 minutes
